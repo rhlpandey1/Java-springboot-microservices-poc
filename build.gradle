@@ -1,0 +1,27 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.4.5'
+    id 'io.spring.dependency-management' version '1.1.6'   // manages Spring versions
+}
+
+group = 'com.example'
+version = '1.0.0'
+
+java {
+    sourceCompatibility = '17'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.kafka:spring-kafka'
+}
+
+// Only build the executable Spring Boot "fat jar" (skip the plain jar),
+// so build/libs/ has exactly one *.jar for the Dockerfile to copy.
+jar {
+    enabled = false
+}

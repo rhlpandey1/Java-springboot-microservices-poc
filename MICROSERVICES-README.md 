@@ -1,0 +1,76 @@
+# Microservices patterns added: Fan-out + Idempotency + DLQ
+
+## IMPORTANT first step
+DELETE the old `OrderConsumer.java` — it's replaced by `InventoryConsumer.java`.
+(Keeping both would double-register the inventory-service group.)
+
+## Files now in the project
+```
+src/main/java/com/example/demo/
+├── OrderController.java       producer (now accepts optional orderId + item=poison)
+├── InventoryConsumer.java     consumer #1 — idempotent, can fail -> DLQ
+├── NotificationConsumer.java  consumer #2 — fan-out (own group)
+├── DeliveryConsumer.java      consumer #3 — fan-out (own group)
+├── DeadLetterConsumer.java    watches order-confirmed.DLT
+├── KafkaErrorConfig.java      retry (2x) then publish to DLQ
+├── KafkaTopicConfig.java      creates order-confirmed topic
+├── DemoApplication.java       (unchanged)
+└── HelloController.java       (unchanged)
+```
+No new dependency needed — spring-kafka already includes retry + DLQ support.
+
+## Run
+```bash
+docker compose up -d        # Kafka broker
+./gradlew bootRun           # the app
+```
+
+## Demo 1 — FAN-OUT (one event, three services)
+```bash
+curl -X POST "http://localhost:8080/orders?item=milk"
+```
+App console shows ALL THREE independent consumers react to the one event:
+```
+[inventory] decremented stock  orderId=ab12cd34  offset=0
+[notification] sent push/SMS  orderId=ab12cd34
+[delivery] assigning rider  orderId=ab12cd34
+```
+Why: each consumer has a different groupId, so each group gets its own copy of every
+message. That is publish-once, consume-many — the post-order microservices pattern.
+
+## Demo 2 — IDEMPOTENCY (duplicate handling)
+Send the SAME orderId twice:
+```bash
+curl -X POST "http://localhost:8080/orders?item=milk&orderId=DUP-1"
+curl -X POST "http://localhost:8080/orders?item=milk&orderId=DUP-1"
+```
+Inventory processes it once, then skips the repeat:
+```
+[inventory] decremented stock  orderId=DUP-1  offset=...
+[inventory] DUPLICATE skipped  orderId=DUP-1
+```
+Why it matters: Kafka is at-least-once by default, so a consumer CAN see a message
+twice. Idempotent consumers make re-delivery safe (no double stock decrement).
+
+## Demo 3 — DLQ (poison message + resilience)
+```bash
+curl -X POST "http://localhost:8080/orders?item=poison"
+```
+Inventory throws, the error handler retries twice, then parks it in the dead-letter topic:
+```
+[notification] sent push/SMS  orderId=...       <- other services still succeed
+[delivery] assigning rider  orderId=...
+... (inventory retries and fails) ...
+[DLQ] poison parked  orderId=...  value={"orderId":"...","item":"poison"}
+```
+Why it matters: a poison message would otherwise block the partition forever
+(head-of-line blocking). Retry + DLQ keeps the pipeline moving and parks the bad
+record for investigation. Note other services are unaffected — failure is isolated.
+
+## Interview gold (say all three)
+- "Fan-out: the order service publishes once; inventory, notification, and delivery
+   are separate consumer groups that each get the event and scale independently."
+- "Idempotency: at-least-once delivery means duplicates happen, so consumers dedupe
+   on a correlation id — re-processing must not double-apply."
+- "DLQ: I retry with backoff, then route poison messages to a dead-letter topic so one
+   bad record can't block the partition, and as an SDET I explicitly test that DLQ path."
